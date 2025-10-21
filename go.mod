@@ -1,4 +1,4 @@
-module godbsql
+module github.com/Nemutagk/godbsql
 
 go 1.25.1
 

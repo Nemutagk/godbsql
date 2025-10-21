@@ -1,0 +1,27 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/go
+{
+		"name": "Existing Dockerfile",
+	"build": {
+		// Sets the run context to one level up instead of the .devcontainer folder.
+		"context": "..",
+		// Update the 'dockerFile' property if you aren't using the standard 'Dockerfile' filename.
+		"dockerfile": "./Dockerfile"
+	},
+	"mounts": [
+		"source=/Users/jcabrera/Documents/ServerPrivado/modulos-go,target=/opt/modules,type=bind,consistency=cached"
+	],
+	"runArgs": [
+		"--name",
+		"sb-godb-sql",
+		"--network",
+		"docker_gwbridge_v2"
+	],
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"golang.go"
+			]
+		}
+	}
+}

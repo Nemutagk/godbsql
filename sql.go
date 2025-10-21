@@ -1,0 +1,337 @@
+package godbsql
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+	"reflect"
+	"strings"
+	"time"
+
+	"github.com/Nemutagk/godb/v2"
+	"github.com/Nemutagk/godb/v2/definitions/models"
+	"github.com/Nemutagk/godb/v2/helper"
+	"github.com/Nemutagk/goenvars"
+	"github.com/google/uuid"
+	_ "github.com/lib/pq"
+)
+
+type Model interface {
+	ScanFields() []any
+}
+
+type Connection[T Model] struct {
+	Conn         *sql.DB
+	Table        string
+	OrderColumns map[string]string
+	SoftDelete   *string
+}
+
+func NewConnection[T Model](connName, table string, orderColumns []string, softDelete *string) (*Connection[T], error) {
+	db, err := godb.GetConnection(connName)
+	if err != nil {
+		return nil, err
+	}
+
+	rawConn, ok := db.Connection.Adapter.GetConnection().(*sql.DB)
+	if !ok {
+		return nil, fmt.Errorf("failed to assert connection to *sql.DB")
+	}
+
+	orderColsMap := make(map[string]string)
+	for _, col := range orderColumns {
+		orderColsMap[col] = ""
+	}
+
+	return &Connection[T]{Conn: rawConn, Table: table, OrderColumns: orderColsMap, SoftDelete: softDelete}, nil
+}
+
+func (c *Connection[T]) GetTableName() string {
+	return c.Table
+}
+
+func (c *Connection[T]) GetOrderColumns() map[string]string {
+	return c.OrderColumns
+}
+
+func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opts *models.Options) ([]T, error) {
+	if c.SoftDelete != nil && *c.SoftDelete != "" {
+		tmpFilters := helper.PrepareSoftDelete(c.SoftDelete, filters)
+		filters = tmpFilters
+	}
+
+	cols := "*"
+
+	if opts != nil && opts.Columns != nil {
+		cols = ""
+		for i, col := range *opts.Columns {
+			if i > 0 {
+				cols += ", "
+			}
+			cols += col
+		}
+	}
+
+	var queryBuilder strings.Builder
+	queryBuilder.WriteString("SELECT ")
+	queryBuilder.WriteString(cols)
+	queryBuilder.WriteString(" FROM ")
+	queryBuilder.WriteString(c.Table)
+
+	args := []any{}
+
+	allFilters, allVals, _ := helper.PrepareFilters(filters, 1)
+	if allFilters != "" {
+		queryBuilder.WriteString(" WHERE ")
+		queryBuilder.WriteString(allFilters)
+		args = append(args, allVals...)
+	}
+
+	if opts != nil {
+		if opts.Limit > 0 {
+			queryBuilder.WriteString(" LIMIT " + fmt.Sprintf("%d", opts.Limit))
+		}
+		if opts.Offset > 0 {
+			queryBuilder.WriteString(" OFFSET " + fmt.Sprintf("%d", opts.Offset))
+		}
+		if opts.OrderColumn != "" {
+			orderDir := "ASC"
+			if strings.ToUpper(opts.OrderDir) == "DESC" {
+				orderDir = "DESC"
+			}
+
+			if _, ok := c.OrderColumns[opts.OrderColumn]; !ok {
+				return nil, fmt.Errorf("invalid order column: %s", opts.OrderColumn)
+			}
+
+			queryBuilder.WriteString(" ORDER BY " + opts.OrderColumn + " " + orderDir)
+		}
+	}
+
+	query := queryBuilder.String()
+
+	if goenvars.GetEnvBool("SQL_DEBUG", false) {
+		log.Println("SQL Query:", query)
+		log.Println("SQL Args:", args)
+	}
+
+	rows, err := c.Conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var models []T
+
+	for rows.Next() {
+		var newModelT T
+		val := reflect.New(reflect.TypeOf(newModelT).Elem())
+		newModelT = val.Interface().(T)
+		err := rows.Scan(newModelT.ScanFields()...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan user: %w", err)
+		}
+		models = append(models, newModelT)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows error: %w", err)
+	}
+
+	return models, nil
+}
+
+func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter) (T, error) {
+	if c.SoftDelete != nil && *c.SoftDelete != "" {
+		tmpFilters := helper.PrepareSoftDelete(c.SoftDelete, filters)
+		filters = tmpFilters
+	}
+
+	opts := &models.Options{
+		Limit: 1,
+	}
+
+	var zero T
+
+	rows, err := c.Get(ctx, filters, opts)
+	if err != nil {
+		return zero, err
+	}
+
+	if len(rows) == 0 {
+		return zero, sql.ErrNoRows
+	}
+
+	return rows[0], nil
+}
+
+func (c *Connection[T]) Create(ctx context.Context, data map[string]any) (T, error) {
+	var zero T
+
+	newUuid, err := uuid.NewV7()
+	if err != nil {
+		return zero, err
+	}
+	data["id"] = newUuid.String()
+	now := time.Now().UTC()
+	data["created_at"] = now
+	data["updated_at"] = now
+
+	columns := make([]string, 0, len(data))
+	values := make([]any, 0, len(data))
+	placeholders := make([]string, 0, len(data))
+	numItems := 1
+	for k, v := range data {
+		columns = append(columns, k)
+		values = append(values, v)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", numItems))
+		numItems++
+	}
+
+	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) RETURNING *",
+		c.Table,
+		strings.Join(columns, ", "),
+		strings.Join(placeholders, ", "),
+	)
+
+	if goenvars.GetEnvBool("SQL_DEBUG", false) {
+		log.Println("SQL Query:", query)
+		log.Println("SQL Values:", values)
+	}
+
+	row := c.Conn.QueryRowContext(ctx, query, values...)
+
+	var modelT T
+
+	val := reflect.New(reflect.TypeOf(modelT).Elem())
+	modelT = val.Interface().(T)
+	err = row.Scan(modelT.ScanFields()...)
+
+	if err != nil {
+		return modelT, err
+	}
+
+	return modelT, nil
+}
+
+func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, data map[string]any) (T, error) {
+	if c.SoftDelete != nil && *c.SoftDelete != "" {
+		tmpFilters := helper.PrepareSoftDelete(c.SoftDelete, filters)
+		filters = tmpFilters
+	}
+
+	delete(data, "id")
+	delete(data, "created_at")
+
+	data["updated_at"] = time.Now().UTC()
+
+	setParts := make([]string, 0, len(data))
+	vals := []any{}
+	items := 1
+	for k, v := range data {
+		setParts = append(setParts, fmt.Sprintf("%s = $%d", k, items))
+		vals = append(vals, v)
+		items++
+	}
+
+	var queryBuilder strings.Builder
+	queryBuilder.WriteString("UPDATE ")
+	queryBuilder.WriteString(c.Table)
+	queryBuilder.WriteString(" SET ")
+	queryBuilder.WriteString(strings.Join(setParts, ", "))
+
+	allFilters, allVals, _ := helper.PrepareFilters(filters, items)
+	if allFilters != "" {
+		queryBuilder.WriteString(" WHERE ")
+		queryBuilder.WriteString(allFilters)
+		vals = append(vals, allVals...)
+	}
+
+	query := queryBuilder.String()
+
+	if goenvars.GetEnvBool("SQL_DEBUG", false) {
+		log.Println("SQL Query:", query)
+		log.Println("SQL Values:", vals)
+	}
+
+	var zero T
+
+	_, err := c.Conn.ExecContext(ctx, query, vals...)
+	if err != nil {
+		return zero, err
+	}
+
+	result, err := c.GetOne(ctx, filters)
+	if err != nil {
+		return zero, err
+	}
+
+	return result, nil
+}
+
+func (c *Connection[T]) Delete(ctx context.Context, filters models.GroupFilter) error {
+	if c.SoftDelete != nil && *c.SoftDelete != "" {
+		c.Update(ctx, filters, map[string]any{
+			"deleted_at": time.Now().UTC(),
+		})
+
+		return nil
+	}
+
+	var queryBuilder strings.Builder
+	queryBuilder.WriteString(fmt.Sprintf("DELETE FROM %s", c.Table))
+
+	allFilters, allVals, _ := helper.PrepareFilters(filters, 1)
+	if allFilters != "" {
+		queryBuilder.WriteString(fmt.Sprintf(" WHERE %s", allFilters))
+	}
+
+	query := queryBuilder.String()
+
+	if goenvars.GetEnvBool("SQL_DEBUG", false) {
+		log.Println("SQL Query:", query)
+		log.Println("SQL Values:", allVals)
+	}
+
+	_, err := c.Conn.ExecContext(ctx, query, allVals...)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Connection[T]) Count(ctx context.Context, filters models.GroupFilter) (int64, error) {
+	if c.SoftDelete != nil && *c.SoftDelete != "" {
+		tmpFilters := helper.PrepareSoftDelete(c.SoftDelete, filters)
+		filters = tmpFilters
+	}
+
+	var queryBuilder strings.Builder
+	queryBuilder.WriteString(fmt.Sprintf("SELECT COUNT(*) FROM %s", c.Table))
+
+	args := []any{}
+
+	allFilters, allVals, _ := helper.PrepareFilters(filters, 1)
+	if allFilters != "" {
+		queryBuilder.WriteString(" WHERE ")
+		queryBuilder.WriteString(allFilters)
+		args = append(args, allVals...)
+	}
+
+	query := queryBuilder.String()
+
+	if goenvars.GetEnvBool("SQL_DEBUG", false) {
+		log.Println("SQL Query:", query)
+		log.Println("SQL Args:", args)
+	}
+
+	var count int64
+	err := c.Conn.QueryRowContext(ctx, query, args...).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+
+	return count, nil
+}

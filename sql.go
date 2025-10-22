@@ -11,10 +11,23 @@ import (
 
 	"github.com/Nemutagk/godb/v2"
 	"github.com/Nemutagk/godb/v2/definitions/models"
-	"github.com/Nemutagk/godb/v2/helper"
+	"github.com/Nemutagk/godb/v2/definitions/repository"
 	"github.com/Nemutagk/goenvars"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+)
+
+const (
+	ComparatorEqual              = "="
+	ComparatorNotEqual           = "!="
+	ComparatorGreaterThan        = ">"
+	ComparatorLessThan           = "<"
+	ComparatorGreaterThanOrEqual = ">="
+	ComparatorLessThanOrEqual    = "<="
+	ComparatorLike               = "LIKE"
+	ComparatorIn                 = "IN"
+	ComparatorIsNull             = "IS NULL"
+	ComparatorIsNotNull          = "IS NOT NULL"
 )
 
 type Model interface {
@@ -26,9 +39,14 @@ type Connection[T Model] struct {
 	Table        string
 	OrderColumns map[string]string
 	SoftDelete   *string
+	Relationer   Relationer[T]
 }
 
-func NewConnection[T Model](connName, table string, orderColumns []string, softDelete *string) (*Connection[T], error) {
+type Relationer[T Model] interface {
+	LoadRelations(ctx context.Context, relation string, models []*T) error
+}
+
+func NewConnection[T Model](connName, table string, orderColumns []string, softDelete *string, relationer Relationer[T]) (repository.DriverConnection[T], error) {
 	db, err := godb.GetConnection(connName)
 	if err != nil {
 		return nil, err
@@ -44,7 +62,13 @@ func NewConnection[T Model](connName, table string, orderColumns []string, softD
 		orderColsMap[col] = ""
 	}
 
-	return &Connection[T]{Conn: rawConn, Table: table, OrderColumns: orderColsMap, SoftDelete: softDelete}, nil
+	return &Connection[T]{
+		Conn:         rawConn,
+		Table:        table,
+		OrderColumns: orderColsMap,
+		SoftDelete:   softDelete,
+		Relationer:   relationer,
+	}, nil
 }
 
 func (c *Connection[T]) GetTableName() string {
@@ -57,7 +81,7 @@ func (c *Connection[T]) GetOrderColumns() map[string]string {
 
 func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opts *models.Options) ([]T, error) {
 	if c.SoftDelete != nil && *c.SoftDelete != "" {
-		tmpFilters := helper.PrepareSoftDelete(c.SoftDelete, filters)
+		tmpFilters := prepareSoftDelete(c.SoftDelete, filters)
 		filters = tmpFilters
 	}
 
@@ -81,7 +105,7 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 
 	args := []any{}
 
-	allFilters, allVals, _ := helper.PrepareFilters(filters, 1)
+	allFilters, allVals, _ := prepareFilters(filters, 1)
 	if allFilters != "" {
 		queryBuilder.WriteString(" WHERE ")
 		queryBuilder.WriteString(allFilters)
@@ -139,12 +163,25 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 		return nil, fmt.Errorf("rows error: %w", err)
 	}
 
+	if opts != nil && len(opts.Relations) > 0 && c.Relationer != nil {
+		modelPointers := make([]*T, len(models))
+		for i := range models {
+			modelPointers[i] = &models[i]
+		}
+
+		for _, relation := range opts.Relations {
+			if err := c.Relationer.LoadRelations(ctx, relation, modelPointers); err != nil {
+				return nil, fmt.Errorf("failed to load relation '%s': %w", relation, err)
+			}
+		}
+	}
+
 	return models, nil
 }
 
 func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter) (T, error) {
 	if c.SoftDelete != nil && *c.SoftDelete != "" {
-		tmpFilters := helper.PrepareSoftDelete(c.SoftDelete, filters)
+		tmpFilters := prepareSoftDelete(c.SoftDelete, filters)
 		filters = tmpFilters
 	}
 
@@ -217,7 +254,7 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any) (T, err
 
 func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, data map[string]any) (T, error) {
 	if c.SoftDelete != nil && *c.SoftDelete != "" {
-		tmpFilters := helper.PrepareSoftDelete(c.SoftDelete, filters)
+		tmpFilters := prepareSoftDelete(c.SoftDelete, filters)
 		filters = tmpFilters
 	}
 
@@ -241,7 +278,7 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 	queryBuilder.WriteString(" SET ")
 	queryBuilder.WriteString(strings.Join(setParts, ", "))
 
-	allFilters, allVals, _ := helper.PrepareFilters(filters, items)
+	allFilters, allVals, _ := prepareFilters(filters, items)
 	if allFilters != "" {
 		queryBuilder.WriteString(" WHERE ")
 		queryBuilder.WriteString(allFilters)
@@ -282,7 +319,7 @@ func (c *Connection[T]) Delete(ctx context.Context, filters models.GroupFilter) 
 	var queryBuilder strings.Builder
 	queryBuilder.WriteString(fmt.Sprintf("DELETE FROM %s", c.Table))
 
-	allFilters, allVals, _ := helper.PrepareFilters(filters, 1)
+	allFilters, allVals, _ := prepareFilters(filters, 1)
 	if allFilters != "" {
 		queryBuilder.WriteString(fmt.Sprintf(" WHERE %s", allFilters))
 	}
@@ -304,7 +341,7 @@ func (c *Connection[T]) Delete(ctx context.Context, filters models.GroupFilter) 
 
 func (c *Connection[T]) Count(ctx context.Context, filters models.GroupFilter) (int64, error) {
 	if c.SoftDelete != nil && *c.SoftDelete != "" {
-		tmpFilters := helper.PrepareSoftDelete(c.SoftDelete, filters)
+		tmpFilters := prepareSoftDelete(c.SoftDelete, filters)
 		filters = tmpFilters
 	}
 
@@ -313,7 +350,7 @@ func (c *Connection[T]) Count(ctx context.Context, filters models.GroupFilter) (
 
 	args := []any{}
 
-	allFilters, allVals, _ := helper.PrepareFilters(filters, 1)
+	allFilters, allVals, _ := prepareFilters(filters, 1)
 	if allFilters != "" {
 		queryBuilder.WriteString(" WHERE ")
 		queryBuilder.WriteString(allFilters)
@@ -334,4 +371,106 @@ func (c *Connection[T]) Count(ctx context.Context, filters models.GroupFilter) (
 	}
 
 	return count, nil
+}
+
+func prepareFilters(filters models.GroupFilter, counter int) (string, []any, int) {
+	var queryBuilder strings.Builder
+
+	if counter <= 0 {
+		counter = 1
+	}
+
+	vals := []any{}
+	for _, tmpFilter := range filters.Filters {
+
+		var currentParts strings.Builder
+		var currentVals []any
+
+		if filter, ok := tmpFilter.(models.Filter); ok {
+			comparator := "="
+			if filter.Comparator != nil {
+				comparator = *filter.Comparator
+			}
+
+			if comparator != ComparatorIsNull && comparator != ComparatorIsNotNull && comparator != ComparatorIn {
+				currentParts.WriteString(fmt.Sprintf("%s %s $%d", filter.Key, comparator, counter))
+				currentVals = append(currentVals, filter.Value)
+
+				counter++
+			} else if comparator == ComparatorIn {
+				log.Println("models.Filter not support 'IN' comparator, use models.FilterMultipleValue")
+				continue
+			} else {
+				currentParts.WriteString(fmt.Sprintf("%s %s", filter.Key, comparator))
+			}
+		} else if multiFilter, ok := tmpFilter.(models.FilterMultipleValue); ok {
+			comparator := "IN"
+			if multiFilter.Comparator != nil {
+				comparator = *multiFilter.Comparator
+			}
+
+			if comparator == ComparatorIn {
+				currentParts.WriteString(fmt.Sprintf("%s %s (", multiFilter.Key, comparator))
+				for _, v := range multiFilter.Values {
+					currentParts.WriteString(fmt.Sprintf("$%d", counter))
+					currentVals = append(currentVals, v)
+					counter++
+				}
+				currentParts.WriteString(")")
+			}
+		} else if groupFilter, ok := tmpFilter.(models.GroupFilter); ok {
+			subQuery, subVals, newCounter := prepareFilters(groupFilter, counter)
+			counter = newCounter
+
+			if subQuery != "" {
+				currentParts.WriteString(fmt.Sprintf("(%s)", subQuery))
+				currentVals = append(currentVals, subVals...)
+			}
+		}
+
+		if currentParts.Len() > 0 {
+			if queryBuilder.Len() > 0 {
+				groupOperator := "AND"
+				if filters.Operator != "" {
+					groupOperator = filters.Operator
+				}
+				queryBuilder.WriteString(fmt.Sprintf(" %s ", groupOperator))
+			}
+
+			queryBuilder.WriteString(currentParts.String())
+			vals = append(vals, currentVals...)
+		}
+	}
+
+	return queryBuilder.String(), vals, counter
+}
+
+func prepareSoftDelete(softDelete *string, filters models.GroupFilter) models.GroupFilter {
+	if softDelete == nil || *softDelete == "" {
+		return filters
+	}
+
+	newGroup := models.GroupFilter{
+		Operator: "OR",
+		Filters:  []any{},
+	}
+
+	// opAnd := models.FilterOperatorAnd
+	or := "OR"
+	isNull := models.FilterSqlComparatorIsNull
+
+	newGroup.Filters = append(newGroup.Filters, models.Filter{
+		Key:        *softDelete,
+		Comparator: &isNull,
+		Value:      nil,
+		Operator:   &or,
+	})
+
+	if len(filters.Filters) > 0 {
+		filters.Filters = append(filters.Filters, newGroup)
+	} else {
+		filters = newGroup
+	}
+
+	return filters
 }

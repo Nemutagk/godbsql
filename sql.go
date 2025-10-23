@@ -3,6 +3,7 @@ package godbsql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"reflect"
@@ -30,6 +31,8 @@ const (
 	ComparatorIsNotNull          = "IS NOT NULL"
 )
 
+var ErrorNoRows = sql.ErrNoRows
+
 type Model interface {
 	ScanFields() []any
 }
@@ -44,6 +47,45 @@ type Connection[T Model] struct {
 
 type Relationer[T Model] interface {
 	LoadRelations(ctx context.Context, relation string, models []*T) error
+}
+
+// Interfaz para que sql.Row y sql.Rows puedan ser usados en la misma función
+type Scannable interface {
+	Scan(dest ...any) error
+}
+
+func scanRow[T Model](row Scannable, model *T) error {
+	originalFields := (*model).ScanFields()
+	tempFields := make([]any, len(originalFields))
+	nullableTimeIndices := make(map[int]*sql.NullTime)
+
+	for i, field := range originalFields {
+		// Si el campo es un puntero a time.Time, usamos un sustituto
+		if ptr, ok := field.(**time.Time); ok && ptr != nil {
+			nt := &sql.NullTime{}
+			tempFields[i] = nt
+			nullableTimeIndices[i] = nt
+		} else {
+			tempFields[i] = field
+		}
+	}
+
+	err := row.Scan(tempFields...)
+	if err != nil {
+		return fmt.Errorf("failed to scan data: %w", err)
+	}
+
+	// Asignar los valores de los sustitutos a los campos originales
+	for i, nt := range nullableTimeIndices {
+		originalField := originalFields[i].(**time.Time)
+		if nt.Valid {
+			*originalField = &nt.Time
+		} else {
+			*originalField = nil
+		}
+	}
+
+	return nil
 }
 
 func NewConnection[T Model](connName, table string, orderColumns []string, softDelete *string, relationer Relationer[T]) (repository.DriverConnection[T], error) {
@@ -142,6 +184,9 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 
 	rows, err := c.Conn.QueryContext(ctx, query, args...)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, godb.ErrNoDocumentsFound
+		}
 		return nil, err
 	}
 	defer rows.Close()
@@ -152,10 +197,11 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 		var newModelT T
 		val := reflect.New(reflect.TypeOf(newModelT).Elem())
 		newModelT = val.Interface().(T)
-		err := rows.Scan(newModelT.ScanFields()...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan user: %w", err)
+
+		if err := scanRow(rows, &newModelT); err != nil {
+			return nil, err
 		}
+
 		models = append(models, newModelT)
 	}
 
@@ -197,7 +243,7 @@ func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter) 
 	}
 
 	if len(rows) == 0 {
-		return zero, sql.ErrNoRows
+		return zero, godb.ErrNoDocumentsFound
 	}
 
 	return rows[0], nil
@@ -240,11 +286,10 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any) (T, err
 	row := c.Conn.QueryRowContext(ctx, query, values...)
 
 	var modelT T
-
 	val := reflect.New(reflect.TypeOf(modelT).Elem())
 	modelT = val.Interface().(T)
-	err = row.Scan(modelT.ScanFields()...)
 
+	err = scanRow(row, &modelT)
 	if err != nil {
 		return modelT, err
 	}
@@ -296,6 +341,10 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 
 	_, err := c.Conn.ExecContext(ctx, query, vals...)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return zero, godb.ErrNoDocumentsFound
+		}
+
 		return zero, err
 	}
 

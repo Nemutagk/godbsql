@@ -27,6 +27,7 @@ const (
 	ComparatorLessThanOrEqual    = "<="
 	ComparatorLike               = "LIKE"
 	ComparatorIn                 = "IN"
+	ComparatorNotIn              = "NOT IN"
 	ComparatorIsNull             = "IS NULL"
 	ComparatorIsNotNull          = "IS NOT NULL"
 )
@@ -382,9 +383,18 @@ func (c *Connection[T]) Delete(ctx context.Context, filters models.GroupFilter) 
 		log.Println("SQL Values:", allVals)
 	}
 
-	_, err := c.Conn.ExecContext(ctx, query, allVals...)
+	result, err := c.Conn.ExecContext(ctx, query, allVals...)
 	if err != nil {
 		return err
+	}
+
+	numRows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if numRows == 0 {
+		return godb.ErrNoDocumentsFound
 	}
 
 	return nil
@@ -443,13 +453,13 @@ func prepareFilters(filters models.GroupFilter, counter int) (string, []any, int
 				comparator = *filter.Comparator
 			}
 
-			if comparator != ComparatorIsNull && comparator != ComparatorIsNotNull && comparator != ComparatorIn {
+			if comparator != ComparatorIsNull && comparator != ComparatorIsNotNull && comparator != ComparatorIn && comparator != ComparatorNotIn {
 				currentParts.WriteString(fmt.Sprintf("%s %s $%d", filter.Key, comparator, counter))
 				currentVals = append(currentVals, filter.Value)
 
 				counter++
-			} else if comparator == ComparatorIn {
-				log.Println("models.Filter not support 'IN' comparator, use models.FilterMultipleValue")
+			} else if comparator == ComparatorIn || comparator == ComparatorNotIn {
+				log.Println("models.Filter not support 'IN' or 'NOT IN' comparator, use models.FilterMultipleValue")
 				continue
 			} else {
 				currentParts.WriteString(fmt.Sprintf("%s %s", filter.Key, comparator))
@@ -460,12 +470,19 @@ func prepareFilters(filters models.GroupFilter, counter int) (string, []any, int
 				comparator = *multiFilter.Comparator
 			}
 
-			if comparator == ComparatorIn {
+			if comparator == ComparatorIn || comparator == ComparatorNotIn {
 				currentParts.WriteString(fmt.Sprintf("%s %s (", multiFilter.Key, comparator))
+				subitems := 1
 				for _, v := range multiFilter.Values {
+					if subitems > 1 {
+						currentParts.WriteString(", ")
+					}
+
 					currentParts.WriteString(fmt.Sprintf("$%d", counter))
+
 					currentVals = append(currentVals, v)
 					counter++
+					subitems++
 				}
 				currentParts.WriteString(")")
 			}

@@ -155,12 +155,6 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 	}
 
 	if opts != nil {
-		if opts.Limit > 0 {
-			queryBuilder.WriteString(" LIMIT " + fmt.Sprintf("%d", opts.Limit))
-		}
-		if opts.Offset > 0 {
-			queryBuilder.WriteString(" OFFSET " + fmt.Sprintf("%d", opts.Offset))
-		}
 		if opts.OrderColumn != "" {
 			orderDir := "ASC"
 			if strings.ToUpper(opts.OrderDir) == "DESC" {
@@ -172,6 +166,14 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 			}
 
 			queryBuilder.WriteString(" ORDER BY " + opts.OrderColumn + " " + orderDir)
+		}
+
+		if opts.Limit > 0 {
+			queryBuilder.WriteString(" LIMIT " + fmt.Sprintf("%d", opts.Limit))
+		}
+
+		if opts.Offset > 0 {
+			queryBuilder.WriteString(" OFFSET " + fmt.Sprintf("%d", opts.Offset))
 		}
 	}
 

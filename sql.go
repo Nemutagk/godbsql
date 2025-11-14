@@ -38,12 +38,23 @@ type Model interface {
 	ScanFields() []any
 }
 
+type RelationLoader interface {
+	Load(ctx context.Context, parentModels []any) error
+}
+
+type OnetoManyLoader[P Model, C Model] struct {
+	Repository     repository.Repository[C]
+	ParentField    string
+	ChildFkField   string
+	ContainerField string
+}
+
 type Connection[T Model] struct {
-	Conn         *sql.DB
-	Table        string
-	OrderColumns map[string]string
-	SoftDelete   *string
-	Relationer   Relationer[T]
+	Conn            *sql.DB
+	Table           string
+	OrderColumns    map[string]string
+	SoftDelete      *string
+	RelationLoaders map[string]RelationLoader
 }
 
 type Relationer[T Model] interface {
@@ -53,6 +64,130 @@ type Relationer[T Model] interface {
 // Interfaz para que sql.Row y sql.Rows puedan ser usados en la misma función
 type Scannable interface {
 	Scan(dest ...any) error
+}
+
+func (l *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any) error {
+	if len(parentModels) == 0 {
+		return nil
+	}
+
+	parentIds := make([]any, 0, len(parentModels))
+	for _, model := range parentModels {
+		val := reflect.ValueOf(model)
+
+		for val.Kind() == reflect.Ptr {
+			val = val.Elem()
+		}
+
+		parentIdField := val.FieldByName(l.ParentField)
+		if !parentIdField.IsValid() {
+			return fmt.Errorf("invalid parent field: %s", l.ParentField)
+		}
+		parentId := parentIdField.Interface()
+		parentIds = append(parentIds, parentId)
+	}
+
+	in := ComparatorIn
+	filters := models.GroupFilter{
+		Filters: []any{
+			models.FilterMultipleValue{
+				Key:        l.ChildFkField,
+				Values:     parentIds,
+				Comparator: &in,
+			},
+		},
+	}
+
+	allChildrens, err := l.Repository.Get(ctx, filters, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get child models: %w", err)
+	}
+
+	for _, child := range allChildrens {
+		valForFieldAcces := reflect.ValueOf(child)
+		for valForFieldAcces.Kind() == reflect.Ptr {
+			valForFieldAcces = valForFieldAcces.Elem()
+		}
+
+		foreignKeyTmp := prepareForeignKey(l.ChildFkField)
+		childFkValue := valForFieldAcces.FieldByName(foreignKeyTmp)
+		if !childFkValue.IsValid() {
+			return fmt.Errorf("invalid child foreign key field: %s, %s", foreignKeyTmp, l.ChildFkField)
+		}
+
+		foreignKey := childFkValue.Interface()
+
+		for _, parent := range parentModels {
+			parentVal := reflect.ValueOf(parent)
+			for parentVal.Kind() == reflect.Ptr {
+				parentVal = parentVal.Elem()
+			}
+
+			parentIdField := parentVal.FieldByName(l.ParentField)
+			if !parentIdField.IsValid() {
+				return fmt.Errorf("invalid parent field: %s", l.ParentField)
+			}
+			parentId := parentIdField.Interface()
+
+			if foreignKey != parentId {
+				continue
+			}
+
+			containerField := parentVal.FieldByName(l.ContainerField)
+			if !containerField.IsValid() {
+				return fmt.Errorf("invalid container field: %s", l.ContainerField)
+			}
+
+			elemToAppend := valForFieldAcces
+			if containerField.Type().Elem().Kind() != reflect.Ptr && elemToAppend.Kind() == reflect.Ptr {
+				elemToAppend = elemToAppend.Elem()
+			} else if containerField.Type().Elem().Kind() == reflect.Ptr && elemToAppend.Kind() != reflect.Ptr {
+				ptr := reflect.New(elemToAppend.Type())
+				ptr.Elem().Set(elemToAppend)
+				elemToAppend = ptr
+			}
+
+			containerField.Set(reflect.Append(containerField, elemToAppend))
+		}
+	}
+
+	// for _, child := range allChildrens {
+	// 	childVal := reflect.ValueOf(child)
+
+	// 	valForFieldAcces := childVal
+	// 	for valForFieldAcces.Kind() == reflect.Ptr {
+	// 		valForFieldAcces = valForFieldAcces.Elem()
+	// 	}
+
+	// 	foreignKey := prepareForeignKey(l.ChildFkField)
+	// 	childFkValue := valForFieldAcces.FieldByName(foreignKey)
+	// 	if !childFkValue.IsValid() {
+	// 		return nil, fmt.Errorf("invalid child foreign key field: %s, %s", foreignKey, l.ChildFkField)
+	// 	}
+
+	// 	childFkValue.Interface()
+	// 	if parents, ok := parentMap[childFkValue]; ok {
+	// 		for _, parentVal := range parents {
+	// 			containerField := parentVal.FieldByName(l.ContainerField)
+	// 			if !containerField.IsValid() {
+	// 				return nil, fmt.Errorf("invalid container field: %s", l.ContainerField)
+	// 			}
+
+	// 			elemToAppend := childVal
+	// 			if containerField.Type().Elem().Kind() != reflect.Ptr && elemToAppend.Kind() == reflect.Ptr {
+	// 				elemToAppend = elemToAppend.Elem()
+	// 			} else if containerField.Type().Elem().Kind() == reflect.Ptr && elemToAppend.Kind() != reflect.Ptr {
+	// 				ptr := reflect.New(elemToAppend.Type())
+	// 				ptr.Elem().Set(elemToAppend)
+	// 				elemToAppend = ptr
+	// 			}
+
+	// 			containerField.Set(reflect.Append(containerField, elemToAppend))
+	// 		}
+	// 	}
+	// }
+
+	return nil
 }
 
 func scanRow[T Model](row Scannable, model *T) error {
@@ -89,7 +224,7 @@ func scanRow[T Model](row Scannable, model *T) error {
 	return nil
 }
 
-func NewConnection[T Model](connName, table string, orderColumns []string, softDelete *string, relationer Relationer[T]) (repository.DriverConnection[T], error) {
+func NewConnection[T Model](connName, table string, orderColumns []string, softDelete *string, relationer map[string]RelationLoader) (repository.DriverConnection[T], error) {
 	db, err := godb.GetConnection(connName)
 	if err != nil {
 		return nil, err
@@ -106,11 +241,11 @@ func NewConnection[T Model](connName, table string, orderColumns []string, softD
 	}
 
 	return &Connection[T]{
-		Conn:         rawConn,
-		Table:        table,
-		OrderColumns: orderColsMap,
-		SoftDelete:   softDelete,
-		Relationer:   relationer,
+		Conn:            rawConn,
+		Table:           table,
+		OrderColumns:    orderColsMap,
+		SoftDelete:      softDelete,
+		RelationLoaders: relationer,
 	}, nil
 }
 
@@ -212,15 +347,25 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 		return nil, fmt.Errorf("rows error: %w", err)
 	}
 
-	if opts != nil && len(opts.Relations) > 0 && c.Relationer != nil {
+	if opts != nil && len(opts.Relations) > 0 && c.RelationLoaders != nil {
 		modelPointers := make([]*T, len(models))
 		for i := range models {
 			modelPointers[i] = &models[i]
 		}
 
+		anyModels := make([]any, len(modelPointers))
+		for i, m := range modelPointers {
+			anyModels[i] = m
+		}
+
 		for _, relation := range opts.Relations {
-			if err := c.Relationer.LoadRelations(ctx, relation, modelPointers); err != nil {
-				return nil, fmt.Errorf("failed to load relation '%s': %w", relation, err)
+			loader, ok := c.RelationLoaders[relation]
+			if !ok {
+				return nil, fmt.Errorf("relation loader not found for relation: %s", relation)
+			}
+
+			if err := loader.Load(ctx, anyModels); err != nil {
+				return nil, fmt.Errorf("failed to load relation %s: %w", relation, err)
 			}
 		}
 	}
@@ -541,4 +686,23 @@ func prepareSoftDelete(softDelete *string, filters models.GroupFilter) models.Gr
 	}
 
 	return filters
+}
+
+func prepareForeignKey(str string) string {
+	// return strings.ToUpper(str[:1]) + str[1:]
+
+	parts := strings.Split(str, "_")
+
+	buffer := strings.Builder{}
+
+	for i := range parts {
+		// if i > 0 {
+		// 	buffer.WriteString("_")
+		// }
+
+		parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
+		buffer.WriteString(parts[i])
+	}
+
+	return buffer.String()
 }

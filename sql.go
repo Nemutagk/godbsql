@@ -49,6 +49,17 @@ type OnetoManyLoader[P Model, C Model] struct {
 	ContainerField string
 }
 
+type ManyToManyLoader[P Model, C Model] struct {
+	Repository      repository.Repository[C]
+	Connection      any
+	ParentKey       string
+	ChildKey        string
+	PivoteParentKey string
+	PivoteChildKey  string
+	PivoteTable     string
+	ContainerField  string
+}
+
 type Connection[T Model] struct {
 	Conn            *sql.DB
 	Table           string
@@ -151,41 +162,264 @@ func (l *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any) er
 		}
 	}
 
-	// for _, child := range allChildrens {
-	// 	childVal := reflect.ValueOf(child)
+	return nil
+}
 
-	// 	valForFieldAcces := childVal
-	// 	for valForFieldAcces.Kind() == reflect.Ptr {
-	// 		valForFieldAcces = valForFieldAcces.Elem()
-	// 	}
+func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any) error {
+	if len(parentModels) == 0 {
+		return nil
+	}
 
-	// 	foreignKey := prepareForeignKey(l.ChildFkField)
-	// 	childFkValue := valForFieldAcces.FieldByName(foreignKey)
-	// 	if !childFkValue.IsValid() {
-	// 		return nil, fmt.Errorf("invalid child foreign key field: %s, %s", foreignKey, l.ChildFkField)
-	// 	}
+	parentModelsIds := []any{}
+	for _, model := range parentModels {
+		val := reflect.ValueOf(model)
+		for val.Kind() == reflect.Ptr {
+			val = val.Elem()
+		}
 
-	// 	childFkValue.Interface()
-	// 	if parents, ok := parentMap[childFkValue]; ok {
-	// 		for _, parentVal := range parents {
-	// 			containerField := parentVal.FieldByName(l.ContainerField)
-	// 			if !containerField.IsValid() {
-	// 				return nil, fmt.Errorf("invalid container field: %s", l.ContainerField)
-	// 			}
+		parentIdField := val.FieldByName(m.ParentKey)
+		if !parentIdField.IsValid() {
+			return fmt.Errorf("invalid parent key field: %s", m.ParentKey)
+		}
 
-	// 			elemToAppend := childVal
-	// 			if containerField.Type().Elem().Kind() != reflect.Ptr && elemToAppend.Kind() == reflect.Ptr {
-	// 				elemToAppend = elemToAppend.Elem()
-	// 			} else if containerField.Type().Elem().Kind() == reflect.Ptr && elemToAppend.Kind() != reflect.Ptr {
-	// 				ptr := reflect.New(elemToAppend.Type())
-	// 				ptr.Elem().Set(elemToAppend)
-	// 				elemToAppend = ptr
-	// 			}
+		parentModelsIds = append(parentModelsIds, parentIdField.Interface())
+	}
 
-	// 			containerField.Set(reflect.Append(containerField, elemToAppend))
-	// 		}
-	// 	}
-	// }
+	var queryBuilder strings.Builder
+	queryBuilder.WriteString("SELECT ")
+	queryBuilder.WriteString(m.PivoteParentKey)
+	queryBuilder.WriteString(", ")
+	queryBuilder.WriteString(m.PivoteChildKey)
+	queryBuilder.WriteString(" FROM ")
+	queryBuilder.WriteString(m.PivoteTable)
+	queryBuilder.WriteString(" WHERE ")
+	queryBuilder.WriteString(m.PivoteParentKey)
+	queryBuilder.WriteString(" IN (")
+
+	for i := range parentModelsIds {
+		if i > 0 {
+			queryBuilder.WriteString(", ")
+		}
+
+		queryBuilder.WriteString(fmt.Sprintf("$%d", i+1))
+	}
+	queryBuilder.WriteString(")")
+
+	query := queryBuilder.String()
+	if goenvars.GetEnvBool("SQL_DEBUG", false) {
+		log.Println("SQL Query:", query)
+		log.Println("SQL Values:", parentModelsIds)
+	}
+
+	sqlConn, ok := m.Connection.(*sql.DB)
+	if !ok {
+		return fmt.Errorf("failed to assert connection to *sql.DB")
+	}
+
+	rows, err := sqlConn.QueryContext(ctx, query, parentModelsIds...)
+	if err != nil {
+		return fmt.Errorf("failed to query pivot table: %w", err)
+	}
+	defer rows.Close()
+
+	listChildForParent := map[any][]any{}
+	listAllChildIds := []any{}
+	for rows.Next() {
+		var parentId, childId any
+
+		if err := rows.Scan(&parentId, &childId); err != nil {
+			return fmt.Errorf("failed to scan pivot row: %w", err)
+		}
+
+		if _, exists := listChildForParent[childId]; !exists {
+			listChildForParent[childId] = []any{}
+		}
+
+		listChildForParent[childId] = append(listChildForParent[childId], parentId)
+		listAllChildIds = append(listAllChildIds, childId)
+	}
+
+	in := ComparatorIn
+	filtersForChildren := models.GroupFilter{
+		Filters: []any{
+			models.FilterMultipleValue{
+				Key:        m.ChildKey,
+				Values:     listAllChildIds,
+				Comparator: &in,
+			},
+		},
+	}
+
+	allChildren, err := m.Repository.Get(ctx, filtersForChildren, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get child models: %w", err)
+	}
+
+	finalContainerChilds := map[string][]any{}
+	for _, child := range allChildren {
+		valForFieldAcces := reflect.ValueOf(child)
+		for valForFieldAcces.Kind() == reflect.Ptr {
+			valForFieldAcces = valForFieldAcces.Elem()
+		}
+
+		childKeyField := valForFieldAcces.FieldByName(m.ChildKey)
+		if !childKeyField.IsValid() {
+			return fmt.Errorf("invalid child key field: %s", m.ChildKey)
+		}
+
+		childKeyValue := childKeyField.Interface()
+
+		parentIdsForChild, exists := listChildForParent[childKeyValue]
+		if !exists {
+			log.Println("No parent IDs found for child key value:", childKeyValue)
+			continue
+		}
+
+		for _, parentId := range parentIdsForChild {
+			_, exists := finalContainerChilds[fmt.Sprintf("%v", parentId)]
+			if !exists {
+				finalContainerChilds[fmt.Sprintf("%v", parentId)] = []any{}
+			}
+
+			elemToAppend := valForFieldAcces
+			if reflect.TypeOf(finalContainerChilds[fmt.Sprintf("%v", parentId)]).Elem().Kind() != reflect.Ptr && elemToAppend.Kind() == reflect.Ptr {
+				elemToAppend = elemToAppend.Elem()
+			} else if reflect.TypeOf(finalContainerChilds[fmt.Sprintf("%v", parentId)]).Elem().Kind() == reflect.Ptr && elemToAppend.Kind() != reflect.Ptr {
+				ptr := reflect.New(elemToAppend.Type())
+				ptr.Elem().Set(elemToAppend)
+				elemToAppend = ptr
+			}
+
+			finalContainerChilds[fmt.Sprintf("%v", parentId)] = append(finalContainerChilds[fmt.Sprintf("%v", parentId)], elemToAppend.Interface())
+		}
+	}
+
+	// Asignar los hijos agrupados a cada padre
+	for _, parent := range parentModels {
+		// parent viene como interface{}, normalmente *app.User o similar
+		pv := reflect.ValueOf(parent)
+
+		// Desenvolver interfaces
+		for pv.Kind() == reflect.Interface {
+			pv = pv.Elem()
+		}
+
+		// Necesitamos un valor direccionable del padre
+		var parentPtr reflect.Value
+		if pv.Kind() == reflect.Ptr {
+			parentPtr = pv
+		} else if pv.Kind() == reflect.Struct {
+			if !pv.CanAddr() {
+				return fmt.Errorf("parent value is not addressable")
+			}
+			parentPtr = pv.Addr()
+		} else {
+			return fmt.Errorf("unexpected parent kind: %s", pv.Kind())
+		}
+
+		// Valor struct para leer campos: desenrollar todos los punteros
+		parentVal := parentPtr
+		for parentVal.Kind() == reflect.Ptr {
+			parentVal = parentVal.Elem()
+		}
+
+		if parentVal.Kind() != reflect.Struct {
+			return fmt.Errorf("expected struct for parent, got: %s", parentVal.Kind())
+		}
+
+		// 1) Obtener ID del padre
+		parentIdField := parentVal.FieldByName(m.ParentKey)
+		if !parentIdField.IsValid() {
+			return fmt.Errorf("invalid parent key field: %s", m.ParentKey)
+		}
+		parentKeyValue := fmt.Sprintf("%v", parentIdField.Interface())
+
+		// 2) Buscar hijos en el mapa
+		childs, ok := finalContainerChilds[parentKeyValue]
+		if !ok {
+			continue // este padre no tiene hijos
+		}
+
+		// 3) Obtener el campo contenedor en el padre
+		containerField := parentVal.FieldByName(m.ContainerField)
+		if !containerField.IsValid() {
+			return fmt.Errorf("invalid container field: %s", m.ContainerField)
+		}
+
+		var sliceType reflect.Type
+
+		switch containerField.Kind() {
+		case reflect.Slice:
+			// Campo es directamente []T
+			sliceType = containerField.Type()
+		case reflect.Ptr:
+			// Campo es *([]T)
+			if containerField.Type().Elem().Kind() != reflect.Slice {
+				return fmt.Errorf("container field %s is a ptr but not to slice, got: %s",
+					m.ContainerField, containerField.Type().Elem().Kind())
+			}
+
+			// Si el puntero es nil, creamos un slice nuevo vacío y se lo asignamos
+			if containerField.IsNil() {
+				sliceType = containerField.Type().Elem() // []T
+				emptySlice := reflect.MakeSlice(sliceType, 0, len(childs))
+				ptr := reflect.New(sliceType) // *([]T)
+				ptr.Elem().Set(emptySlice)
+				containerField.Set(ptr)
+			}
+
+			// A partir de aquí, siempre trabajamos con el tipo del slice subyacente
+			sliceType = containerField.Type().Elem()
+		default:
+			return fmt.Errorf("container field %s is not a slice, got: %s",
+				m.ContainerField, containerField.Kind())
+		}
+
+		elemType := sliceType.Elem()
+
+		// 4) Crear slice del tipo correcto
+		newSlice := reflect.MakeSlice(sliceType, 0, len(childs))
+
+		// 5) Convertir cada hijo al tipo de elemento del slice
+		for _, c := range childs {
+			cv := reflect.ValueOf(c)
+
+			if elemType.Kind() == reflect.Ptr {
+				if cv.Kind() != reflect.Ptr {
+					if cv.Type() != elemType.Elem() {
+						return fmt.Errorf("child type %s does not match container element type %s",
+							cv.Type(), elemType)
+					}
+					ptr := reflect.New(cv.Type())
+					ptr.Elem().Set(cv)
+					cv = ptr
+				} else {
+					if cv.Type() != elemType {
+						return fmt.Errorf("child pointer type %s does not match container element type %s",
+							cv.Type(), elemType)
+					}
+				}
+			} else {
+				if cv.Kind() == reflect.Ptr {
+					cv = cv.Elem()
+				}
+				if cv.Type() != elemType {
+					return fmt.Errorf("child value type %s does not match container element type %s",
+						cv.Type(), elemType)
+				}
+			}
+
+			newSlice = reflect.Append(newSlice, cv)
+		}
+
+		// 6) Asignar el slice al padre
+		switch containerField.Kind() {
+		case reflect.Slice:
+			containerField.Set(newSlice) // []T = []T
+		case reflect.Ptr:
+			containerField.Elem().Set(newSlice) // *([]T) -> []T
+		}
+	}
 
 	return nil
 }
@@ -255,6 +489,10 @@ func (c *Connection[T]) GetTableName() string {
 
 func (c *Connection[T]) GetOrderColumns() map[string]string {
 	return c.OrderColumns
+}
+
+func (c *Connection[T]) GetConnection() any {
+	return c.Conn
 }
 
 func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opts *models.Options) ([]T, error) {
@@ -397,17 +635,42 @@ func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter) 
 	return rows[0], nil
 }
 
-func (c *Connection[T]) Create(ctx context.Context, data map[string]any) (T, error) {
+func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *models.Options) (T, error) {
 	var zero T
 
 	newUuid, err := uuid.NewV7()
 	if err != nil {
 		return zero, err
 	}
-	data["id"] = newUuid.String()
-	now := time.Now().UTC()
-	data["created_at"] = now
-	data["updated_at"] = now
+
+	if opts == nil {
+		opts = &models.Options{}
+	}
+
+	if opts.PrimaryKey == nil {
+		idStr := "id"
+		opts.PrimaryKey = &idStr
+	}
+
+	if opts.InsertPrimaryKey == nil {
+		insertPk := true
+		opts.InsertPrimaryKey = &insertPk
+	}
+
+	if opts.TimestampsFields == nil {
+		timestamps := true
+		opts.TimestampsFields = &timestamps
+	}
+
+	if *opts.InsertPrimaryKey {
+		data[*opts.PrimaryKey] = newUuid.String()
+	}
+
+	if *opts.TimestampsFields {
+		now := time.Now().UTC()
+		data["created_at"] = now
+		data["updated_at"] = now
+	}
 
 	columns := make([]string, 0, len(data))
 	values := make([]any, 0, len(data))
@@ -443,6 +706,106 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any) (T, err
 	}
 
 	return modelT, nil
+}
+
+func (c *Connection[T]) CreateMany(ctx context.Context, dataList []map[string]any, opts *models.Options) ([]T, error) {
+	// var zero T
+
+	// newUuid, err := uuid.NewV7()
+	// if err != nil {
+	// 	return zero, err
+	// }
+
+	// if opts == nil {
+	// 	opts = &models.Options{}
+	// }
+
+	// if opts.PrimaryKey == nil {
+	// 	idStr := "id"
+	// 	opts.PrimaryKey = &idStr
+	// }
+
+	// if opts.InsertPrimaryKey == nil {
+	// 	insertPk := true
+	// 	opts.InsertPrimaryKey = &insertPk
+	// }
+
+	// if opts.TimestampsFields == nil {
+	// 	timestamps := true
+	// 	opts.TimestampsFields = &timestamps
+	// }
+
+	// if *opts.InsertPrimaryKey {
+	// 	data[*opts.PrimaryKey] = newUuid.String()
+	// }
+
+	// if *opts.TimestampsFields {
+	// 	now := time.Now().UTC()
+	// 	data["created_at"] = now
+	// 	data["updated_at"] = now
+	// }
+
+	if len(dataList) == 0 {
+		return []T{}, nil
+	}
+
+	data := dataList[0]
+	columns := make([]string, 0, len(data))
+	for k, _ := range data {
+		columns = append(columns, k)
+	}
+
+	var query strings.Builder
+	// query := fmt.Sprintf("INSERT INTO %s (%s) VALUES ",
+	query.WriteString(fmt.Sprintf("INSERT INTO %s (%s) VALUES ",
+		c.Table,
+		strings.Join(columns, ", "),
+	))
+
+	values := make([]any, 0, len(data))
+	totalItems := 1
+	for indexData, tmpItem := range dataList {
+		placeholders := make([]string, 0, len(data))
+
+		if indexData > 0 {
+			query.WriteString(", ")
+		}
+
+		for _, k := range tmpItem {
+			values = append(values, k)
+			placeholders = append(placeholders, fmt.Sprintf("$%d", totalItems))
+			totalItems++
+		}
+
+		query.WriteString(fmt.Sprintf("(%s)", strings.Join(placeholders, ", ")))
+	}
+
+	queryStr := query.String() + " RETURNING *"
+	if goenvars.GetEnvBool("SQL_DEBUG", false) {
+		log.Println("SQL Query:", queryStr)
+		log.Println("SQL Values:", values)
+	}
+
+	rows, err := c.Conn.QueryContext(ctx, queryStr, values...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var resultModels []T
+	for rows.Next() {
+		var modelT T
+		val := reflect.New(reflect.TypeOf(modelT).Elem())
+		modelT = val.Interface().(T)
+
+		if err := scanRow(rows, &modelT); err != nil {
+			return nil, err
+		}
+
+		resultModels = append(resultModels, modelT)
+	}
+
+	return resultModels, nil
 }
 
 func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, data map[string]any) (T, error) {

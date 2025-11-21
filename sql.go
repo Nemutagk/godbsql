@@ -30,6 +30,8 @@ const (
 	ComparatorNotIn              = "NOT IN"
 	ComparatorIsNull             = "IS NULL"
 	ComparatorIsNotNull          = "IS NOT NULL"
+	OperatorAnd                  = "AND"
+	OperatorOr                   = "OR"
 )
 
 var ErrorNoRows = sql.ErrNoRows
@@ -632,14 +634,13 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 	return models, nil
 }
 
-func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter) (T, error) {
-	if c.SoftDelete != nil && *c.SoftDelete != "" {
-		tmpFilters := prepareSoftDelete(c.SoftDelete, filters)
-		filters = tmpFilters
-	}
-
-	opts := &models.Options{
-		Limit: 1,
+func (c *Connection[T]) GetOne(ctx context.Context, filters models.GroupFilter, opts *models.Options) (T, error) {
+	if opts == nil {
+		opts = &models.Options{
+			Limit: 1,
+		}
+	} else {
+		opts.Limit = 1
 	}
 
 	var zero T
@@ -730,49 +731,13 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 }
 
 func (c *Connection[T]) CreateMany(ctx context.Context, dataList []map[string]any, opts *models.Options) ([]T, error) {
-	// var zero T
-
-	// newUuid, err := uuid.NewV7()
-	// if err != nil {
-	// 	return zero, err
-	// }
-
-	// if opts == nil {
-	// 	opts = &models.Options{}
-	// }
-
-	// if opts.PrimaryKey == nil {
-	// 	idStr := "id"
-	// 	opts.PrimaryKey = &idStr
-	// }
-
-	// if opts.InsertPrimaryKey == nil {
-	// 	insertPk := true
-	// 	opts.InsertPrimaryKey = &insertPk
-	// }
-
-	// if opts.TimestampsFields == nil {
-	// 	timestamps := true
-	// 	opts.TimestampsFields = &timestamps
-	// }
-
-	// if *opts.InsertPrimaryKey {
-	// 	data[*opts.PrimaryKey] = newUuid.String()
-	// }
-
-	// if *opts.TimestampsFields {
-	// 	now := time.Now().UTC()
-	// 	data["created_at"] = now
-	// 	data["updated_at"] = now
-	// }
-
 	if len(dataList) == 0 {
 		return []T{}, nil
 	}
 
 	data := dataList[0]
 	columns := make([]string, 0, len(data))
-	for k, _ := range data {
+	for k := range data {
 		columns = append(columns, k)
 	}
 
@@ -880,7 +845,7 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 		return zero, err
 	}
 
-	result, err := c.GetOne(ctx, filters)
+	result, err := c.GetOne(ctx, filters, nil)
 	if err != nil {
 		return zero, err
 	}
@@ -1026,11 +991,13 @@ func prepareFilters(filters models.GroupFilter, counter int) (string, []any, int
 		}
 
 		if currentParts.Len() > 0 {
+			// log.Printf("queryBuilderLen: %d\n", queryBuilder.Len())
 			if queryBuilder.Len() > 0 {
-				groupOperator := "AND"
+				groupOperator := OperatorAnd
 				if filters.Operator != "" {
 					groupOperator = filters.Operator
 				}
+				// log.Printf("Using group operator: %s\n", groupOperator)
 				queryBuilder.WriteString(fmt.Sprintf(" %s ", groupOperator))
 			}
 

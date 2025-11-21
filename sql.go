@@ -158,7 +158,28 @@ func (l *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any) er
 				elemToAppend = ptr
 			}
 
-			containerField.Set(reflect.Append(containerField, elemToAppend))
+			switch containerField.Kind() {
+			case reflect.Slice:
+				containerField.Set(reflect.Append(containerField, elemToAppend))
+			case reflect.Ptr:
+				if containerField.Type().Elem().Kind() != reflect.Slice {
+					return fmt.Errorf("container field pointer is not pointing to a slice: %s", l.ContainerField)
+				}
+
+				if containerField.IsNil() {
+					sliceType := containerField.Type().Elem()
+					emptySlce := reflect.MakeSlice(sliceType, 0, 0)
+					ptr := reflect.New(sliceType)
+					ptr.Elem().Set(emptySlce)
+					containerField.Set(ptr)
+				}
+
+				sliceVal := containerField.Elem()
+				sliceVal = reflect.Append(sliceVal, elemToAppend)
+				containerField.Elem().Set(sliceVal)
+			default:
+				return fmt.Errorf("container field is not a slice or pointer to slice: %s", l.ContainerField)
+			}
 		}
 	}
 

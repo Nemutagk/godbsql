@@ -40,10 +40,6 @@ type Model interface {
 	ScanFields() []any
 }
 
-type RelationLoader interface {
-	Load(ctx context.Context, parentModels []any, childs *[]string) error
-}
-
 type OnetoManyLoader[P Model, C Model] struct {
 	Repository     repository.Repository[C]
 	ParentField    string
@@ -62,12 +58,19 @@ type ManyToManyLoader[P Model, C Model] struct {
 	ContainerField  string
 }
 
+type OnetoOneLoader[P Model, C Model] struct {
+	Repository     repository.Repository[C]
+	ParentField    string
+	ChildFkField   string
+	ContainerField string
+}
+
 type Connection[T Model] struct {
 	Conn            *sql.DB
 	Table           string
 	OrderColumns    map[string]string
 	SoftDelete      *string
-	RelationLoaders map[string]RelationLoader
+	RelationLoaders map[string]repository.RelationLoader
 }
 
 // Interfaz para que sql.Row y sql.Rows puedan ser usados en la misma función
@@ -455,6 +458,89 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 	return nil
 }
 
+func (c *OnetoOneLoader[P, C]) Load(ctx context.Context, parentModel []any, childs *[]string) error {
+	if parentModel == nil {
+		return nil
+	}
+
+	val := reflect.ValueOf(parentModel[0])
+
+	for val.Kind() == reflect.Ptr {
+		val = val.Elem()
+	}
+
+	parentIdField := val.FieldByName(c.ParentField)
+	if !parentIdField.IsValid() {
+		return fmt.Errorf("invalid parent field: %s", c.ParentField)
+	}
+	parentId := parentIdField.Interface()
+
+	filterChild := models.GroupFilter{
+		Filters: []any{
+			models.Filter{Key: c.ChildFkField, Value: parentId},
+		},
+	}
+
+	opts := models.Options{}
+
+	if childs != nil && len(*childs) > 0 {
+		opts.Relations = *childs
+	}
+
+	childModel, err := c.Repository.GetOne(ctx, filterChild, &opts)
+	if err != nil {
+		return fmt.Errorf("failed to load child model: %w", err)
+	}
+
+	containerFlied := val.FieldByName(c.ContainerField)
+	if !containerFlied.IsValid() {
+		return fmt.Errorf("invalid container field: %s", c.ContainerField)
+	}
+
+	if !containerFlied.CanSet() {
+		return fmt.Errorf("cannot set container field: %s", c.ContainerField)
+	}
+
+	childVal := reflect.ValueOf(childModel)
+
+	switch containerFlied.Kind() {
+	case reflect.Ptr:
+		if childVal.Kind() != reflect.Ptr {
+			if childVal.Type() != containerFlied.Type().Elem() {
+				return fmt.Errorf("child type %s does not match container field type %s",
+					childVal.Type(), containerFlied.Type().Elem())
+			}
+			ptr := reflect.New(childVal.Type())
+			ptr.Elem().Set(childVal)
+			childVal = ptr
+		} else {
+			if childVal.Type() != containerFlied.Type() {
+				return fmt.Errorf("child pointer type %s does not match container field type %s",
+					childVal.Type(), containerFlied.Type())
+			}
+		}
+		containerFlied.Set(childVal)
+	case reflect.Interface:
+		if childVal.Type().Implements(containerFlied.Type()) {
+			containerFlied.Set(childVal)
+		} else {
+			return fmt.Errorf("child type %s does not implement container interface type %s",
+				childVal.Type(), containerFlied.Type())
+		}
+	default:
+		if childVal.Kind() == reflect.Ptr {
+			childVal = childVal.Elem()
+		}
+		if childVal.Type() != containerFlied.Type() {
+			return fmt.Errorf("child value type %s does not match container field type %s",
+				childVal.Type(), containerFlied.Type())
+		}
+		containerFlied.Set(childVal)
+	}
+
+	return nil
+}
+
 func scanRow[T Model](row Scannable, model *T) error {
 	originalFields := (*model).ScanFields()
 	tempFields := make([]any, len(originalFields))
@@ -489,7 +575,7 @@ func scanRow[T Model](row Scannable, model *T) error {
 	return nil
 }
 
-func NewConnection[T Model](connName, table string, orderColumns []string, softDelete *string, relationer map[string]RelationLoader) (repository.DriverConnection[T], error) {
+func NewConnection[T Model](connName, table string, orderColumns []string, softDelete *string, relationer map[string]repository.RelationLoader) (repository.DriverConnection[T], error) {
 	db, err := godb.GetConnection(connName)
 	if err != nil {
 		return nil, err
@@ -524,6 +610,19 @@ func (c *Connection[T]) GetOrderColumns() map[string]string {
 
 func (c *Connection[T]) GetConnection() any {
 	return c.Conn
+}
+
+func (c *Connection[T]) AddRelation(relation string, loader repository.RelationLoader) error {
+	if c.RelationLoaders == nil {
+		c.RelationLoaders = make(map[string]repository.RelationLoader)
+	}
+
+	if _, exists := c.RelationLoaders[relation]; exists {
+		return fmt.Errorf("relation loader already exists for relation: %s", relation)
+	}
+
+	c.RelationLoaders[relation] = loader
+	return nil
 }
 
 func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opts *models.Options) ([]T, error) {

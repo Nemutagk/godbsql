@@ -41,7 +41,7 @@ type Model interface {
 }
 
 type RelationLoader interface {
-	Load(ctx context.Context, parentModels []any) error
+	Load(ctx context.Context, parentModels []any, childs *[]string) error
 }
 
 type OnetoManyLoader[P Model, C Model] struct {
@@ -70,16 +70,12 @@ type Connection[T Model] struct {
 	RelationLoaders map[string]RelationLoader
 }
 
-type Relationer[T Model] interface {
-	LoadRelations(ctx context.Context, relation string, models []*T) error
-}
-
 // Interfaz para que sql.Row y sql.Rows puedan ser usados en la misma función
 type Scannable interface {
 	Scan(dest ...any) error
 }
 
-func (l *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any) error {
+func (l *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any, childs *[]string) error {
 	if len(parentModels) == 0 {
 		return nil
 	}
@@ -111,7 +107,13 @@ func (l *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any) er
 		},
 	}
 
-	allChildrens, err := l.Repository.Get(ctx, filters, nil)
+	opts := models.Options{}
+
+	if childs != nil && len(*childs) > 0 {
+		opts.Relations = *childs
+	}
+
+	allChildrens, err := l.Repository.Get(ctx, filters, &opts)
 	if err != nil {
 		return fmt.Errorf("failed to get child models: %w", err)
 	}
@@ -188,7 +190,7 @@ func (l *OnetoManyLoader[P, C]) Load(ctx context.Context, parentModels []any) er
 	return nil
 }
 
-func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any) error {
+func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, childs *[]string) error {
 	if len(parentModels) == 0 {
 		return nil
 	}
@@ -273,7 +275,13 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any) e
 		},
 	}
 
-	allChildren, err := m.Repository.Get(ctx, filtersForChildren, nil)
+	opts := models.Options{}
+
+	if childs != nil && len(*childs) > 0 {
+		opts.Relations = *childs
+	}
+
+	allChildren, err := m.Repository.Get(ctx, filtersForChildren, &opts)
 	if err != nil {
 		return fmt.Errorf("failed to get child models: %w", err)
 	}
@@ -620,12 +628,19 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 		}
 
 		for _, relation := range opts.Relations {
+			childs := &[]string{}
+			if strings.Contains(relation, ".") {
+				tmp_items := strings.Split(relation, ".")
+				relation = tmp_items[0]
+				*childs = tmp_items[1:]
+			}
+
 			loader, ok := c.RelationLoaders[relation]
 			if !ok {
 				return nil, fmt.Errorf("relation loader not found for relation: %s", relation)
 			}
 
-			if err := loader.Load(ctx, anyModels); err != nil {
+			if err := loader.Load(ctx, anyModels, childs); err != nil {
 				return nil, fmt.Errorf("failed to load relation %s: %w", relation, err)
 			}
 		}

@@ -459,7 +459,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 }
 
 func (c *OnetoOneLoader[P, C]) Load(ctx context.Context, parentModel []any, childs *[]string) error {
-	if parentModel == nil {
+	if parentModel == nil || len(parentModel) == 0 {
 		return nil
 	}
 

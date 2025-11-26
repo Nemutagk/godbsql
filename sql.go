@@ -731,7 +731,8 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 			if strings.Contains(relation, ".") {
 				tmp_items := strings.Split(relation, ".")
 				relation = tmp_items[0]
-				*childs = tmp_items[1:]
+				next_childs := strings.Join(tmp_items[1:], ".")
+				*childs = []string{next_childs}
 			}
 
 			loader, ok := c.RelationLoaders[relation]

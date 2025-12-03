@@ -41,14 +41,14 @@ type Model interface {
 }
 
 type OnetoManyLoader[P Model, C Model] struct {
-	Repository     repository.Repository[C]
+	Repository     repository.DriverConnection[C]
 	ParentField    string
 	ChildFkField   string
 	ContainerField string
 }
 
 type ManyToManyLoader[P Model, C Model] struct {
-	Repository      repository.Repository[C]
+	Repository      repository.DriverConnection[C]
 	Connection      any
 	ParentKey       string
 	ChildKey        string
@@ -59,7 +59,7 @@ type ManyToManyLoader[P Model, C Model] struct {
 }
 
 type OnetoOneLoader[P Model, C Model] struct {
-	Repository     repository.Repository[C]
+	Repository     repository.DriverConnection[C]
 	ParentField    string
 	ChildFkField   string
 	ContainerField string

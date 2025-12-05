@@ -970,9 +970,13 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 
 func (c *Connection[T]) Delete(ctx context.Context, filters models.GroupFilter) error {
 	if c.SoftDelete != nil && *c.SoftDelete != "" {
-		c.Update(ctx, filters, map[string]any{
+		_, err := c.Update(ctx, filters, map[string]any{
 			"deleted_at": time.Now().UTC(),
 		})
+
+		if err != nil {
+			return err
+		}
 
 		return nil
 	}

@@ -56,7 +56,7 @@ func (m *MockRepository[T]) CreateMany(ctx context.Context, payloads []map[strin
 	return args.Get(0).([]T), args.Error(1)
 }
 
-func (m *MockRepository[T]) Update(ctx context.Context, filters models.GroupFilter, payload map[string]any) (T, error) {
+func (m *MockRepository[T]) Update(ctx context.Context, filters models.GroupFilter, payload map[string]any, opts *models.Options) (T, error) {
 	args := m.Called(ctx, filters, payload)
 	return args.Get(0).(T), args.Error(1)
 }

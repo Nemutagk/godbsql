@@ -36,6 +36,12 @@ const (
 
 var ErrorNoRows = sql.ErrNoRows
 
+type RawSQL string
+
+func (r RawSQL) String() string {
+	return string(r)
+}
+
 type Model interface {
 	ScanFields() []any
 }
@@ -816,8 +822,12 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 	for k, v := range data {
 		columns = append(columns, k)
 		values = append(values, v)
-		placeholders = append(placeholders, fmt.Sprintf("$%d", numItems))
-		numItems++
+		if raw, ok := v.(RawSQL); !ok {
+			placeholders = append(placeholders, fmt.Sprintf("$%d", numItems))
+			numItems++
+		} else {
+			placeholders = append(placeholders, raw.String())
+		}
 	}
 
 	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) RETURNING *",
@@ -909,7 +919,7 @@ func (c *Connection[T]) CreateMany(ctx context.Context, dataList []map[string]an
 	return resultModels, nil
 }
 
-func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, data map[string]any) (T, error) {
+func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, data map[string]any, opts *models.Options) (T, error) {
 	if c.SoftDelete != nil && *c.SoftDelete != "" {
 		tmpFilters := prepareSoftDelete(c.SoftDelete, filters)
 		filters = tmpFilters
@@ -924,6 +934,11 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 	vals := []any{}
 	items := 1
 	for k, v := range data {
+		if raw, ok := v.(RawSQL); ok {
+			setParts = append(setParts, fmt.Sprintf("%s = %s", k, raw.String()))
+			continue
+		}
+
 		setParts = append(setParts, fmt.Sprintf("%s = $%d", k, items))
 		vals = append(vals, v)
 		items++
@@ -960,6 +975,17 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 		return zero, err
 	}
 
+	returnedRow := true
+
+	if opts != nil && opts.ReturnUpdated != nil {
+		returnedRow = *opts.ReturnUpdated
+	}
+
+	if !returnedRow {
+		var empty T
+		return empty, nil
+	}
+
 	result, err := c.GetOne(ctx, filters, nil)
 	if err != nil {
 		return zero, err
@@ -970,9 +996,13 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 
 func (c *Connection[T]) Delete(ctx context.Context, filters models.GroupFilter) error {
 	if c.SoftDelete != nil && *c.SoftDelete != "" {
+		nop := false
+		opts := &models.Options{
+			ReturnUpdated: &nop,
+		}
 		_, err := c.Update(ctx, filters, map[string]any{
 			"deleted_at": time.Now().UTC(),
-		})
+		}, opts)
 
 		if err != nil {
 			return err

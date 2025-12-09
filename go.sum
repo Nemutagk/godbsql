@@ -1,5 +1,7 @@
 github.com/Nemutagk/godb/v2 v2.8.0 h1:glzO6RpCGLU5LHXlQ1zn50MCgpND9VnaEXKOmmLsJ58=
 github.com/Nemutagk/godb/v2 v2.8.0/go.mod h1:ROr+sWR8c9NFZdKawnGyYkyc/tivy1/8nPbdQiMP4Sw=
+github.com/Nemutagk/godb/v2 v2.8.1 h1:9LAa5GxWsMpKEsbMwHUx3S0IX6YQWiZiWwftAtldwMQ=
+github.com/Nemutagk/godb/v2 v2.8.1/go.mod h1:ROr+sWR8c9NFZdKawnGyYkyc/tivy1/8nPbdQiMP4Sw=
 github.com/Nemutagk/goenvars v1.4.1 h1:kCgJHs86olOlnlNB46LgHt0G0ieoNIVm99QPVA6NpaY=
 github.com/Nemutagk/goenvars v1.4.1/go.mod h1:RQH+GyuKb1TAiKGs3X29jgHDVWxM9EHlfjIasYKCKA0=
 github.com/aws/aws-sdk-go-v2 v1.36.3 h1:mJoei2CxPutQVxaATCzDUjcZEjVRdpsiiXi2o38yqWM=

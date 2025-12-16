@@ -547,12 +547,52 @@ func (c *OnetoOneLoader[P, C]) Load(ctx context.Context, parentModel []any, chil
 	return nil
 }
 
-func scanRow[T Model](row Scannable, model *T) error {
+func scanRow[T Model](row Scannable, model *T, returnColumns *[]string) error {
 	originalFields := (*model).ScanFields()
-	tempFields := make([]any, len(originalFields))
+	validateFields := []any{}
+
+	if returnColumns != nil {
+		modelVal := reflect.ValueOf(model).Elem()
+		for modelVal.Kind() == reflect.Ptr {
+			modelVal = modelVal.Elem()
+		}
+
+		for _, col := range *returnColumns {
+			// convertir columna (snake_case) a nombre de campo CamelCase (ej. created_at -> CreatedAt)
+			fieldName := prepareForeignKey(col)
+
+			// si no es struct válido, usamos placeholder
+			if modelVal.Kind() != reflect.Struct {
+				tmp := new(interface{})
+				validateFields = append(validateFields, tmp)
+				continue
+			}
+
+			f := modelVal.FieldByName(fieldName)
+			if !f.IsValid() {
+				// campo no encontrado: usar placeholder para que Scan no falle
+				tmp := new(interface{})
+				validateFields = append(validateFields, tmp)
+				continue
+			}
+
+			// pasar puntero direccionable al campo
+			if f.CanAddr() {
+				validateFields = append(validateFields, f.Addr().Interface())
+			} else {
+				// campo no direccionable -> crear placeholder del mismo tipo
+				tmp := reflect.New(f.Type()).Interface()
+				validateFields = append(validateFields, tmp)
+			}
+		}
+	} else {
+		validateFields = originalFields
+	}
+
+	tempFields := make([]any, len(validateFields))
 	nullableTimeIndices := make(map[int]*sql.NullTime)
 
-	for i, field := range originalFields {
+	for i, field := range validateFields {
 		// Si el campo es un puntero a time.Time, usamos un sustituto
 		if ptr, ok := field.(**time.Time); ok && ptr != nil {
 			nt := &sql.NullTime{}
@@ -710,7 +750,7 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 		val := reflect.New(reflect.TypeOf(newModelT).Elem())
 		newModelT = val.Interface().(T)
 
-		if err := scanRow(rows, &newModelT); err != nil {
+		if err := scanRow(rows, &newModelT, opts.Columns); err != nil {
 			return nil, err
 		}
 
@@ -847,7 +887,7 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 	val := reflect.New(reflect.TypeOf(modelT).Elem())
 	modelT = val.Interface().(T)
 
-	err = scanRow(row, &modelT)
+	err = scanRow(row, &modelT, opts.Columns)
 	if err != nil {
 		return modelT, err
 	}
@@ -909,7 +949,7 @@ func (c *Connection[T]) CreateMany(ctx context.Context, dataList []map[string]an
 		val := reflect.New(reflect.TypeOf(modelT).Elem())
 		modelT = val.Interface().(T)
 
-		if err := scanRow(rows, &modelT); err != nil {
+		if err := scanRow(rows, &modelT, opts.Columns); err != nil {
 			return nil, err
 		}
 

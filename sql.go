@@ -750,8 +750,14 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 		val := reflect.New(reflect.TypeOf(newModelT).Elem())
 		newModelT = val.Interface().(T)
 
-		if err := scanRow(rows, &newModelT, opts.Columns); err != nil {
-			return nil, err
+		if opts == nil {
+			if err := scanRow(rows, &newModelT, nil); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := scanRow(rows, &newModelT, opts.Columns); err != nil {
+				return nil, err
+			}
 		}
 
 		models = append(models, newModelT)

@@ -910,6 +910,10 @@ func (c *Connection[T]) CreateMany(ctx context.Context, dataList []map[string]an
 		return []T{}, nil
 	}
 
+	if opts == nil {
+		opts = &models.Options{}
+	}
+
 	data := dataList[0]
 	columns := make([]string, 0, len(data))
 	for k := range data {

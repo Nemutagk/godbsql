@@ -273,65 +273,69 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 		listAllChildIds = append(listAllChildIds, childId)
 	}
 
-	in := ComparatorIn
-	filtersForChildren := models.GroupFilter{
-		Filters: []any{
-			models.FilterMultipleValue{
-				Key:        m.ChildKey,
-				Values:     listAllChildIds,
-				Comparator: &in,
-			},
-		},
-	}
-
-	opts := models.Options{}
-
-	if childs != nil && len(*childs) > 0 {
-		opts.Relations = *childs
-	}
-
-	allChildren, err := m.Repository.Get(ctx, filtersForChildren, &opts)
-	if err != nil {
-		return fmt.Errorf("failed to get child models: %w", err)
-	}
-
 	finalContainerChilds := map[string][]any{}
-	for _, child := range allChildren {
-		valForFieldAcces := reflect.ValueOf(child)
-		for valForFieldAcces.Kind() == reflect.Ptr {
-			valForFieldAcces = valForFieldAcces.Elem()
+	if len(listAllChildIds) > 0 {
+		in := ComparatorIn
+		filtersForChildren := models.GroupFilter{
+			Filters: []any{
+				models.FilterMultipleValue{
+					Key:        m.ChildKey,
+					Values:     listAllChildIds,
+					Comparator: &in,
+				},
+			},
 		}
 
-		childKeyField := valForFieldAcces.FieldByName(m.ChildKey)
-		if !childKeyField.IsValid() {
-			return fmt.Errorf("invalid child key field: %s", m.ChildKey)
+		opts := models.Options{}
+
+		if childs != nil && len(*childs) > 0 {
+			opts.Relations = *childs
 		}
 
-		childKeyValue := childKeyField.Interface()
-
-		parentIdsForChild, exists := listChildForParent[childKeyValue]
-		if !exists {
-			log.Println("No parent IDs found for child key value:", childKeyValue)
-			continue
+		allChildren, err := m.Repository.Get(ctx, filtersForChildren, &opts)
+		if err != nil {
+			return fmt.Errorf("failed to get child models: %w", err)
 		}
 
-		for _, parentId := range parentIdsForChild {
-			_, exists := finalContainerChilds[fmt.Sprintf("%v", parentId)]
+		for _, child := range allChildren {
+			valForFieldAcces := reflect.ValueOf(child)
+			for valForFieldAcces.Kind() == reflect.Ptr {
+				valForFieldAcces = valForFieldAcces.Elem()
+			}
+
+			childKeyField := valForFieldAcces.FieldByName(m.ChildKey)
+			if !childKeyField.IsValid() {
+				return fmt.Errorf("invalid child key field: %s", m.ChildKey)
+			}
+
+			childKeyValue := childKeyField.Interface()
+
+			parentIdsForChild, exists := listChildForParent[childKeyValue]
 			if !exists {
-				finalContainerChilds[fmt.Sprintf("%v", parentId)] = []any{}
+				log.Println("No parent IDs found for child key value:", childKeyValue)
+				continue
 			}
 
-			elemToAppend := valForFieldAcces
-			if reflect.TypeOf(finalContainerChilds[fmt.Sprintf("%v", parentId)]).Elem().Kind() != reflect.Ptr && elemToAppend.Kind() == reflect.Ptr {
-				elemToAppend = elemToAppend.Elem()
-			} else if reflect.TypeOf(finalContainerChilds[fmt.Sprintf("%v", parentId)]).Elem().Kind() == reflect.Ptr && elemToAppend.Kind() != reflect.Ptr {
-				ptr := reflect.New(elemToAppend.Type())
-				ptr.Elem().Set(elemToAppend)
-				elemToAppend = ptr
-			}
+			for _, parentId := range parentIdsForChild {
+				_, exists := finalContainerChilds[fmt.Sprintf("%v", parentId)]
+				if !exists {
+					finalContainerChilds[fmt.Sprintf("%v", parentId)] = []any{}
+				}
 
-			finalContainerChilds[fmt.Sprintf("%v", parentId)] = append(finalContainerChilds[fmt.Sprintf("%v", parentId)], elemToAppend.Interface())
+				elemToAppend := valForFieldAcces
+				if reflect.TypeOf(finalContainerChilds[fmt.Sprintf("%v", parentId)]).Elem().Kind() != reflect.Ptr && elemToAppend.Kind() == reflect.Ptr {
+					elemToAppend = elemToAppend.Elem()
+				} else if reflect.TypeOf(finalContainerChilds[fmt.Sprintf("%v", parentId)]).Elem().Kind() == reflect.Ptr && elemToAppend.Kind() != reflect.Ptr {
+					ptr := reflect.New(elemToAppend.Type())
+					ptr.Elem().Set(elemToAppend)
+					elemToAppend = ptr
+				}
+
+				finalContainerChilds[fmt.Sprintf("%v", parentId)] = append(finalContainerChilds[fmt.Sprintf("%v", parentId)], elemToAppend.Interface())
+			}
 		}
+	} else {
+		log.Printf("No child IDs found in pivot table for parent IDs: %v", parentModelsIds)
 	}
 
 	// Asignar los hijos agrupados a cada padre

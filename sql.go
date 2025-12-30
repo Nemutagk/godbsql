@@ -897,7 +897,20 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 		log.Println("SQL Values:", values)
 	}
 
-	row := c.Conn.QueryRowContext(ctx, query, values...)
+	var row *sql.Row
+
+	if opts != nil && opts.Transaction != nil {
+		actualTransaction := *opts.Transaction
+		tx, ok := actualTransaction.Tx.(*sql.Tx)
+		if !ok {
+			return zero, fmt.Errorf("failed to assert transaction to *sql.Tx")
+		}
+
+		log.Printf("use tx for transactions in connection %s", c.Name)
+		row = tx.QueryRowContext(ctx, query, values...)
+	} else {
+		row = c.Conn.QueryRowContext(ctx, query, values...)
+	}
 
 	var modelT T
 	val := reflect.New(reflect.TypeOf(modelT).Elem())
@@ -985,6 +998,10 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 		filters = tmpFilters
 	}
 
+	if opts == nil {
+		opts = &models.Options{}
+	}
+
 	delete(data, "id")
 	delete(data, "created_at")
 
@@ -1026,13 +1043,31 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 
 	var zero T
 
-	_, err := c.Conn.ExecContext(ctx, query, vals...)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return zero, godb.ErrNoDocumentsFound
+	if opts.Transaction == nil {
+		_, err := c.Conn.ExecContext(ctx, query, vals...)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return zero, godb.ErrNoDocumentsFound
+			}
+
+			return zero, fmt.Errorf("failed to execute query on connection \"%s\": %w", c.Name, err)
+		}
+	} else {
+		actual := *opts.Transaction
+		tx, ok := actual.Tx.(*sql.Tx)
+		if !ok {
+			return zero, fmt.Errorf("failed to assert transaction to *sql.Tx")
 		}
 
-		return zero, fmt.Errorf("failed to execute query on connection \"%s\": %w", c.Name, err)
+		log.Printf("use tx for transactions in connection %s", c.Name)
+		_, err := tx.ExecContext(ctx, query, vals...)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return zero, godb.ErrNoDocumentsFound
+			}
+
+			return zero, fmt.Errorf("failed to execute query on connection \"%s\": %w", c.Name, err)
+		}
 	}
 
 	returnedRow := true
@@ -1135,6 +1170,44 @@ func (c *Connection[T]) Count(ctx context.Context, filters models.GroupFilter) (
 	}
 
 	return count, nil
+}
+
+func (c *Connection[T]) TransactionStart(ctx context.Context) (*models.Transaction, error) {
+	tx, err := c.Conn.BeginTx(ctx, nil)
+	if err != nil {
+		log.Fatalf("failed to start transaction on connection \"%s\": %v", c.Name, err)
+		return nil, err
+	}
+
+	return &models.Transaction{Tx: tx, Name: c.Name}, nil
+}
+
+func (c *Connection[T]) TransactionCommit(ctx context.Context, tx *models.Transaction) error {
+	trans, ok := tx.Tx.(*sql.Tx)
+	if !ok {
+		return fmt.Errorf("invalid transaction type for connection \"%s\"", c.Name)
+	}
+
+	if err := trans.Commit(); err != nil {
+		log.Fatalf("failed to commit transaction on connection \"%s\": %v", c.Name, err)
+		return err
+	}
+
+	return nil
+}
+
+func (c *Connection[T]) TransactionRollback(ctx context.Context, tx *models.Transaction) error {
+	trans, ok := tx.Tx.(*sql.Tx)
+	if !ok {
+		return fmt.Errorf("invalid transaction type for connection \"%s\"", c.Name)
+	}
+
+	if err := trans.Rollback(); err != nil {
+		log.Fatalf("failed to rollback transaction on connection \"%s\": %v", c.Name, err)
+		return err
+	}
+
+	return nil
 }
 
 func prepareFilters(filters models.GroupFilter, counter int) (string, []any, int) {

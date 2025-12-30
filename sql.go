@@ -906,7 +906,6 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 			return zero, fmt.Errorf("failed to assert transaction to *sql.Tx")
 		}
 
-		log.Printf("use tx for transactions in connection %s", c.Name)
 		row = tx.QueryRowContext(ctx, query, values...)
 	} else {
 		row = c.Conn.QueryRowContext(ctx, query, values...)
@@ -1059,7 +1058,6 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 			return zero, fmt.Errorf("failed to assert transaction to *sql.Tx")
 		}
 
-		log.Printf("use tx for transactions in connection %s", c.Name)
 		_, err := tx.ExecContext(ctx, query, vals...)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {

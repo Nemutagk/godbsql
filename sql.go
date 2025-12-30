@@ -72,6 +72,7 @@ type OnetoOneLoader[P Model, C Model] struct {
 }
 
 type Connection[T Model] struct {
+	Name            string
 	Conn            *sql.DB
 	Table           string
 	OrderColumns    map[string]string
@@ -642,6 +643,7 @@ func NewConnection[T Model](connName, table string, orderColumns []string, softD
 	}
 
 	return &Connection[T]{
+		Name:            connName,
 		Conn:            rawConn,
 		Table:           table,
 		OrderColumns:    orderColsMap,
@@ -652,6 +654,10 @@ func NewConnection[T Model](connName, table string, orderColumns []string, softD
 
 func (c *Connection[T]) GetTableName() string {
 	return c.Table
+}
+
+func (c *Connection[T]) GetConnectionName() *string {
+	return &c.Name
 }
 
 func (c *Connection[T]) GetOrderColumns() map[string]string {
@@ -743,7 +749,7 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, godb.ErrNoDocumentsFound
 		}
-		return nil, err
+		return nil, fmt.Errorf("failed to execute query on connection \"%s\": %w", c.Name, err)
 	}
 	defer rows.Close()
 
@@ -899,7 +905,7 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 
 	err = scanRow(row, &modelT, opts.Columns)
 	if err != nil {
-		return modelT, err
+		return modelT, fmt.Errorf("failed to execute query on connection \"%s\": %w", c.Name, err)
 	}
 
 	return modelT, nil
@@ -1026,7 +1032,7 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 			return zero, godb.ErrNoDocumentsFound
 		}
 
-		return zero, err
+		return zero, fmt.Errorf("failed to execute query on connection \"%s\": %w", c.Name, err)
 	}
 
 	returnedRow := true
@@ -1082,12 +1088,12 @@ func (c *Connection[T]) Delete(ctx context.Context, filters models.GroupFilter) 
 
 	result, err := c.Conn.ExecContext(ctx, query, allVals...)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to execute query on connection \"%s\": %w", c.Name, err)
 	}
 
 	numRows, err := result.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get rows affected on connection %s: %w", c.Name, err)
 	}
 
 	if numRows == 0 {
@@ -1125,7 +1131,7 @@ func (c *Connection[T]) Count(ctx context.Context, filters models.GroupFilter) (
 	var count int64
 	err := c.Conn.QueryRowContext(ctx, query, args...).Scan(&count)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to execute query on connection \"%s\": %w", c.Name, err)
 	}
 
 	return count, nil

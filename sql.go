@@ -14,6 +14,7 @@ import (
 	"github.com/Nemutagk/godb/v2/definitions/models"
 	"github.com/Nemutagk/godb/v2/definitions/repository"
 	"github.com/Nemutagk/goenvars"
+	"github.com/Nemutagk/golog"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 )
@@ -242,8 +243,8 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 
 	query := queryBuilder.String()
 	if goenvars.GetEnvBool("SQL_DEBUG", false) {
-		log.Println("SQL Query:", query)
-		log.Println("SQL Values:", parentModelsIds)
+		golog.Log(ctx, "SQL Query:", query)
+		golog.Log(ctx, "SQL Values:", parentModelsIds)
 	}
 
 	sqlConn, ok := m.Connection.(*sql.DB)
@@ -313,7 +314,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 
 			parentIdsForChild, exists := listChildForParent[childKeyValue]
 			if !exists {
-				log.Println("No parent IDs found for child key value:", childKeyValue)
+				golog.Log(ctx, "No parent IDs found for child key value:", childKeyValue)
 				continue
 			}
 
@@ -336,7 +337,7 @@ func (m *ManyToManyLoader[P, C]) Load(ctx context.Context, parentModels []any, c
 			}
 		}
 	} else {
-		log.Printf("No child IDs found in pivot table for parent IDs: %v", parentModelsIds)
+		golog.Printf("No child IDs found in pivot table for parent IDs: %v", parentModelsIds)
 	}
 
 	// Asignar los hijos agrupados a cada padre
@@ -740,8 +741,8 @@ func (c *Connection[T]) Get(ctx context.Context, filters models.GroupFilter, opt
 	query := queryBuilder.String()
 
 	if goenvars.GetEnvBool("SQL_DEBUG", false) {
-		log.Println("SQL Query:", query)
-		log.Println("SQL Args:", args)
+		golog.Log(ctx, "SQL Query:", query)
+		golog.Log(ctx, "SQL Args:", args)
 	}
 
 	rows, err := c.Conn.QueryContext(ctx, query, args...)
@@ -893,8 +894,8 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 	)
 
 	if goenvars.GetEnvBool("SQL_DEBUG", false) {
-		log.Println("SQL Query:", query)
-		log.Println("SQL Values:", values)
+		golog.Log(ctx, "SQL Query:", query)
+		golog.Log(ctx, "SQL Values:", values)
 	}
 
 	var row *sql.Row
@@ -965,8 +966,8 @@ func (c *Connection[T]) CreateMany(ctx context.Context, dataList []map[string]an
 
 	queryStr := query.String() + " RETURNING *"
 	if goenvars.GetEnvBool("SQL_DEBUG", false) {
-		log.Println("SQL Query:", queryStr)
-		log.Println("SQL Values:", values)
+		golog.Log(ctx, "SQL Query:", queryStr)
+		golog.Log(ctx, "SQL Values:", values)
 	}
 
 	rows, err := c.Conn.QueryContext(ctx, queryStr, values...)
@@ -1036,8 +1037,8 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 	query := queryBuilder.String()
 
 	if goenvars.GetEnvBool("SQL_DEBUG", false) {
-		log.Println("SQL Query:", query)
-		log.Println("SQL Values:", vals)
+		golog.Log(ctx, "SQL Query:", query)
+		golog.Log(ctx, "SQL Values:", vals)
 	}
 
 	var zero T
@@ -1115,8 +1116,8 @@ func (c *Connection[T]) Delete(ctx context.Context, filters models.GroupFilter) 
 	query := queryBuilder.String()
 
 	if goenvars.GetEnvBool("SQL_DEBUG", false) {
-		log.Println("SQL Query:", query)
-		log.Println("SQL Values:", allVals)
+		golog.Log(ctx, "SQL Query:", query)
+		golog.Log(ctx, "SQL Values:", allVals)
 	}
 
 	result, err := c.Conn.ExecContext(ctx, query, allVals...)
@@ -1157,8 +1158,8 @@ func (c *Connection[T]) Count(ctx context.Context, filters models.GroupFilter) (
 	query := queryBuilder.String()
 
 	if goenvars.GetEnvBool("SQL_DEBUG", false) {
-		log.Println("SQL Query:", query)
-		log.Println("SQL Args:", args)
+		golog.Log(ctx, "SQL Query:", query)
+		golog.Log(ctx, "SQL Args:", args)
 	}
 
 	var count int64
@@ -1209,6 +1210,7 @@ func (c *Connection[T]) TransactionRollback(ctx context.Context, tx *models.Tran
 }
 
 func prepareFilters(filters models.GroupFilter, counter int) (string, []any, int) {
+	ctx := context.Background()
 	var queryBuilder strings.Builder
 
 	if counter <= 0 {
@@ -1233,7 +1235,7 @@ func prepareFilters(filters models.GroupFilter, counter int) (string, []any, int
 
 				counter++
 			} else if comparator == ComparatorIn || comparator == ComparatorNotIn {
-				log.Println("models.Filter not support 'IN' or 'NOT IN' comparator, use models.FilterMultipleValue")
+				golog.Log(ctx, "models.Filter not support 'IN' or 'NOT IN' comparator, use models.FilterMultipleValue")
 				continue
 			} else {
 				currentParts.WriteString(fmt.Sprintf("%s %s", filter.Key, comparator))
@@ -1271,13 +1273,13 @@ func prepareFilters(filters models.GroupFilter, counter int) (string, []any, int
 		}
 
 		if currentParts.Len() > 0 {
-			// log.Printf("queryBuilderLen: %d\n", queryBuilder.Len())
+			// golog.Printf("queryBuilderLen: %d\n", queryBuilder.Len())
 			if queryBuilder.Len() > 0 {
 				groupOperator := OperatorAnd
 				if filters.Operator != "" {
 					groupOperator = filters.Operator
 				}
-				// log.Printf("Using group operator: %s\n", groupOperator)
+				// golog.Printf("Using group operator: %s\n", groupOperator)
 				queryBuilder.WriteString(fmt.Sprintf(" %s ", groupOperator))
 			}
 

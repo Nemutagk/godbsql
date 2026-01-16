@@ -5,13 +5,13 @@ go 1.25.1
 require (
 	github.com/Nemutagk/godb/v2 v2.9.0
 	github.com/Nemutagk/goenvars v1.4.1
+	github.com/Nemutagk/golog v1.4.1
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.10.9
 	github.com/stretchr/testify v1.11.1
 )
 
 require (
-	github.com/Nemutagk/golog v1.4.1 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.36.3 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.29.14 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.67 // indirect

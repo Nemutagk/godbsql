@@ -47,6 +47,16 @@ type Model interface {
 	ScanFields() []any
 }
 
+type NewConnectionConfig struct {
+	Name             string
+	Table            string
+	OrderColumns     []string
+	InsertId         *bool
+	InsertTimestamps *bool
+	SoftDelete       *string
+	Relationer       map[string]repository.RelationLoader
+}
+
 type OnetoManyLoader[P Model, C Model] struct {
 	Repository     repository.DriverConnection[C]
 	ParentField    string
@@ -73,12 +83,14 @@ type OnetoOneLoader[P Model, C Model] struct {
 }
 
 type Connection[T Model] struct {
-	Name            string
-	Conn            *sql.DB
-	Table           string
-	OrderColumns    map[string]string
-	SoftDelete      *string
-	RelationLoaders map[string]repository.RelationLoader
+	Name             string
+	Conn             *sql.DB
+	Table            string
+	OrderColumns     map[string]string
+	SoftDelete       *string
+	RelationLoaders  map[string]repository.RelationLoader
+	InsertId         bool
+	InsertTimestamps bool
 }
 
 // Interfaz para que sql.Row y sql.Rows puedan ser usados en la misma función
@@ -627,8 +639,8 @@ func scanRow[T Model](row Scannable, model *T, returnColumns *[]string) error {
 	return nil
 }
 
-func NewConnection[T Model](connName, table string, orderColumns []string, softDelete *string, relationer map[string]repository.RelationLoader) (repository.DriverConnection[T], error) {
-	db, err := godb.GetConnection(connName)
+func NewConnection[T Model](config NewConnectionConfig) (repository.DriverConnection[T], error) {
+	db, err := godb.GetConnection(config.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -639,17 +651,28 @@ func NewConnection[T Model](connName, table string, orderColumns []string, softD
 	}
 
 	orderColsMap := make(map[string]string)
-	for _, col := range orderColumns {
+	for _, col := range config.OrderColumns {
 		orderColsMap[col] = ""
 	}
 
+	si := true
+	if config.InsertId == nil {
+		config.InsertId = &si
+	}
+
+	if config.InsertTimestamps == nil {
+		config.InsertTimestamps = &si
+	}
+
 	return &Connection[T]{
-		Name:            connName,
-		Conn:            rawConn,
-		Table:           table,
-		OrderColumns:    orderColsMap,
-		SoftDelete:      softDelete,
-		RelationLoaders: relationer,
+		Name:             config.Name,
+		Conn:             rawConn,
+		Table:            config.Table,
+		OrderColumns:     orderColsMap,
+		SoftDelete:       config.SoftDelete,
+		RelationLoaders:  config.Relationer,
+		InsertId:         *config.InsertId,
+		InsertTimestamps: *config.InsertTimestamps,
 	}, nil
 }
 
@@ -862,11 +885,11 @@ func (c *Connection[T]) Create(ctx context.Context, data map[string]any, opts *m
 		opts.TimestampsFields = &timestamps
 	}
 
-	if *opts.InsertPrimaryKey {
+	if *opts.InsertPrimaryKey && c.InsertId {
 		data[*opts.PrimaryKey] = newUuid.String()
 	}
 
-	if *opts.TimestampsFields {
+	if *opts.TimestampsFields && c.InsertTimestamps {
 		now := time.Now().UTC()
 		data["created_at"] = now
 		data["updated_at"] = now
@@ -1005,7 +1028,14 @@ func (c *Connection[T]) Update(ctx context.Context, filters models.GroupFilter, 
 	delete(data, "id")
 	delete(data, "created_at")
 
-	data["updated_at"] = time.Now().UTC()
+	updateTimestamps := false
+	if opts != nil && *opts.TimestampsFields {
+		updateTimestamps = true
+	}
+
+	if c.InsertTimestamps && updateTimestamps {
+		data["updated_at"] = time.Now().UTC()
+	}
 
 	setParts := make([]string, 0, len(data))
 	vals := []any{}

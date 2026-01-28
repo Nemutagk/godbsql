@@ -9,6 +9,9 @@ RUN apt-get update && apt-get upgrade -y && \
 
 RUN go install golang.org/x/tools/gopls@latest
 
+RUN mkdir -p /go/pkg && \
+    chown -R vscode:vscode /go/pkg
+
 WORKDIR /workspaces
 
 USER vscode
